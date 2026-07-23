@@ -189,7 +189,66 @@ jobs:
 
           echo "::group::Load diagnostic report"
           if [[ -n "${REPORT_PATH}" && -f "${REPORT_PATH}" ]]; then
-            cat "${REPORT_PATH}"
+            node - "${REPORT_PATH}" <<'NODE'
+          const { readFileSync } = require('node:fs');
+
+          const report = JSON.parse(readFileSync(process.argv[2], 'utf8'));
+          const summary = {
+            runStatus: report.runStatus,
+            durationMs: report.durationMs,
+            scenario: report.scenario,
+            connections: report.connections,
+            traffic: report.traffic,
+            stage: report.stage,
+            control: report.control,
+            health: {
+              healthyShards: report.health?.healthyShards,
+              expectedShards: report.health?.expectedShards,
+              slowShardObservedStale: report.health?.slowShardObservedStale,
+              unhealthyShards: report.health?.shards?.filter(
+                (shard) => shard.status !== 'healthy',
+              ),
+            },
+            storageOperations: report.storageOperations,
+            diagnostics: {
+              acknowledgementLatencyTrend:
+                report.diagnostics?.acknowledgementLatencyTrend,
+              errors: report.diagnostics?.errors,
+              generatorHost: {
+                samples: report.diagnostics?.generatorHost?.samples,
+                cpuPercent: report.diagnostics?.generatorHost?.cpuPercent,
+                eventLoopLagMs:
+                  report.diagnostics?.generatorHost?.eventLoopLagMs,
+                maxActiveConnections:
+                  report.diagnostics?.generatorHost?.maxActiveConnections,
+                maxOpenFileDescriptors:
+                  report.diagnostics?.generatorHost?.maxOpenFileDescriptors,
+                maxRssBytes:
+                  report.diagnostics?.generatorHost?.maxRssBytes,
+              },
+              generatorNetwork: {
+                baseline: report.diagnostics?.generatorNetwork?.baseline,
+                collectionErrors:
+                  report.diagnostics?.generatorNetwork?.collectionErrors,
+                ephemeralPortRange:
+                  report.diagnostics?.generatorNetwork?.ephemeralPortRange,
+                final: report.diagnostics?.generatorNetwork?.final,
+                peak: report.diagnostics?.generatorNetwork?.peak,
+              },
+              phases: report.diagnostics?.phases,
+              serverHealth: {
+                samples: report.diagnostics?.serverHealth?.samples,
+                collectionErrors:
+                  report.diagnostics?.serverHealth?.collectionErrors,
+                peak: report.diagnostics?.serverHealth?.peak,
+              },
+            },
+            errors: report.errors,
+            verdict: report.verdict,
+          };
+
+          console.log(JSON.stringify(summary, null, 2));
+          NODE
           else
             echo "No load report was written."
           fi
@@ -202,6 +261,15 @@ jobs:
             echo "No Worker log was written."
           fi
           echo "::endgroup::"
+
+      - name: Preserve the complete report for one day
+        if: always() && steps.load.outputs.REPORT_PATH != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.profile }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: app/${{ steps.load.outputs.REPORT_PATH }}
+          if-no-files-found: warn
+          retention-days: 1
 
       - name: Stop the local Worker
         if: always() && inputs.profile != 'staging-2500'
