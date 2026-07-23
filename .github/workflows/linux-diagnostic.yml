@@ -56,10 +56,25 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ulimit -n 250000
-          sudo sysctl -w net.ipv4.ip_local_port_range="1024 65535"
-          sudo sysctl -w net.ipv4.tcp_tw_reuse=1
-          echo "file descriptors: $(ulimit -n)"
+          soft_limit="$(ulimit -Sn)"
+          hard_limit="$(ulimit -Hn)"
+          target_limit=250000
+          if (( hard_limit < target_limit )); then
+            target_limit="${hard_limit}"
+          fi
+          if ! ulimit -Sn "${target_limit}"; then
+            echo "Runner kept its existing file-descriptor limit."
+          fi
+
+          if ! sudo sysctl -w net.ipv4.ip_local_port_range="1024 65535"; then
+            echo "Runner kept its existing ephemeral-port range."
+          fi
+          if ! sudo sysctl -w net.ipv4.tcp_tw_reuse=1; then
+            echo "Runner kept its existing TIME_WAIT reuse setting."
+          fi
+
+          echo "file descriptors soft: $(ulimit -Sn)"
+          echo "file descriptors hard: $(ulimit -Hn)"
           sysctl net.ipv4.ip_local_port_range
           sysctl net.ipv4.tcp_tw_reuse
 
