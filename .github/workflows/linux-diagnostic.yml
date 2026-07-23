@@ -1,0 +1,172 @@
+name: Linux load diagnostic
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Fixed local-only diagnostic profile
+        required: true
+        type: choice
+        default: local-1000
+        options:
+          - local-1000
+          - local-2500
+
+permissions:
+  contents: read
+
+concurrency:
+  group: break-it-live-linux-diagnostic
+  cancel-in-progress: false
+
+jobs:
+  diagnostic:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out the private application read-only
+        uses: actions/checkout@v4
+        with:
+          repository: elikemnordor/break-it-live
+          ref: main
+          path: app
+          ssh-key: ${{ secrets.BREAK_IT_LIVE_DEPLOY_KEY }}
+          persist-credentials: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install dependencies
+        working-directory: app
+        run: pnpm install --frozen-lockfile
+
+      - name: Build local static assets
+        working-directory: app
+        run: pnpm build:apps
+
+      - name: Record and tune Linux socket limits
+        shell: bash
+        run: |
+          set -euo pipefail
+          ulimit -n 250000
+          sudo sysctl -w net.ipv4.ip_local_port_range="1024 65535"
+          sudo sysctl -w net.ipv4.tcp_tw_reuse=1
+          echo "file descriptors: $(ulimit -n)"
+          sysctl net.ipv4.ip_local_port_range
+          sysctl net.ipv4.tcp_tw_reuse
+
+      - name: Start the Worker locally
+        working-directory: app
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm exec wrangler dev \
+            --ip 127.0.0.1 \
+            --port 8787 \
+            --var SHARD_COUNT:32 \
+            --log-level error \
+            --show-interactive-dev-session false \
+            >"${RUNNER_TEMP}/break-it-live-worker.log" 2>&1 &
+          echo "$!" >"${RUNNER_TEMP}/break-it-live-worker.pid"
+
+          for attempt in $(seq 1 90); do
+            if curl --fail --silent --show-error \
+              http://127.0.0.1:8787/api/health >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "Local Worker did not become ready." >&2
+          tail -n 200 "${RUNNER_TEMP}/break-it-live-worker.log" >&2
+          exit 1
+
+      - name: Run the fixed local-only diagnostic
+        id: load
+        working-directory: app
+        shell: bash
+        env:
+          PROFILE: ${{ inputs.profile }}
+        run: |
+          set -uo pipefail
+
+          if [[ "${PROFILE}" == "local-1000" ]]; then
+            clients=1000
+            event_prefix=github-linux-local-1000
+            report_name=github-linux-local-1000.json
+            extra_args=()
+          elif [[ "${PROFILE}" == "local-2500" ]]; then
+            clients=2500
+            event_prefix=github-linux-local-2500
+            report_name=github-linux-local-2500.json
+            extra_args=(
+              --join-stages=1500,2000,2500
+              --join-stage-hold=30000
+            )
+          else
+            echo "Unsupported fixed profile: ${PROFILE}" >&2
+            exit 2
+          fi
+
+          report_path="loadtest/reports/${report_name}"
+          event_id="${event_prefix}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          status=0
+
+          LOAD_REPORT_PATH="${report_path}" pnpm test:load:ws -- \
+            --event-id="${event_id}" \
+            --clients="${clients}" \
+            --shards=32 \
+            --join-rate=125 \
+            --join-concurrency=100 \
+            --reconnect-percent=0 \
+            --taps-per-client=100 \
+            --taps-per-sync=25 \
+            --tapping-duration=5000 \
+            --countdown=1000 \
+            --ack-timeout=120000 \
+            "${extra_args[@]}" || status=$?
+
+          echo "LOAD_EXIT_STATUS=${status}" >>"${GITHUB_OUTPUT}"
+          echo "REPORT_PATH=${report_path}" >>"${GITHUB_OUTPUT}"
+          exit "${status}"
+
+      - name: Print the complete diagnostic evidence
+        if: always()
+        working-directory: app
+        shell: bash
+        env:
+          REPORT_PATH: ${{ steps.load.outputs.REPORT_PATH }}
+        run: |
+          set -uo pipefail
+
+          echo "::group::Load diagnostic report"
+          if [[ -n "${REPORT_PATH}" && -f "${REPORT_PATH}" ]]; then
+            cat "${REPORT_PATH}"
+          else
+            echo "No load report was written."
+          fi
+          echo "::endgroup::"
+
+          echo "::group::Local Worker log (last 500 lines)"
+          if [[ -f "${RUNNER_TEMP}/break-it-live-worker.log" ]]; then
+            tail -n 500 "${RUNNER_TEMP}/break-it-live-worker.log"
+          else
+            echo "No Worker log was written."
+          fi
+          echo "::endgroup::"
+
+      - name: Stop the local Worker
+        if: always()
+        shell: bash
+        run: |
+          if [[ -f "${RUNNER_TEMP}/break-it-live-worker.pid" ]]; then
+            kill "$(cat "${RUNNER_TEMP}/break-it-live-worker.pid")" || true
+          fi
