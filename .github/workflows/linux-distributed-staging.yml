@@ -1,0 +1,245 @@
+name: Distributed Linux staging gate
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: break-it-live-linux-distributed
+  cancel-in-progress: false
+
+env:
+  EVENT_ID: github-linux-staging-5000-distributed-${{ github.run_id }}-${{ github.run_attempt }}
+  LOAD_BASE_URL: https://break-it-live-staging.elikemnordor.workers.dev
+  LOAD_DISPLAY_ACCESS_CODE: ${{ secrets.STAGING_DISPLAY_ACCESS_CODE }}
+  LOAD_OPERATOR_ACCESS_CODE: ${{ secrets.STAGING_OPERATOR_ACCESS_CODE }}
+
+jobs:
+  controller:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out the private application read-only
+        uses: actions/checkout@v4
+        with:
+          repository: elikemnordor/break-it-live
+          ref: main
+          path: app
+          ssh-key: ${{ secrets.BREAK_IT_LIVE_DEPLOY_KEY }}
+          persist-credentials: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install dependencies
+        working-directory: app
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify the deployed staging Worker
+        run: |
+          curl --fail --silent --show-error \
+            "${LOAD_BASE_URL}/api/health" >/dev/null
+
+      - name: Run the event controller
+        working-directory: app
+        env:
+          LOAD_REPORT_PATH: loadtest/reports/staging-5000-distributed-controller.json
+        run: |
+          pnpm test:load:distributed -- \
+            --role=controller \
+            --event-id="${EVENT_ID}" \
+            --clients=5000 \
+            --generator-count=2 \
+            --generator-index=0 \
+            --shards=32 \
+            --join-rate=63 \
+            --join-concurrency=100 \
+            --reconnect-percent=0 \
+            --taps-per-client=100 \
+            --taps-per-sync=25 \
+            --tapping-duration=5000 \
+            --countdown=1000 \
+            --ack-timeout=120000
+
+      - name: Preserve the controller report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-5000-distributed-controller
+          path: app/loadtest/reports/staging-5000-distributed-controller.json
+          if-no-files-found: error
+          retention-days: 1
+
+  generators:
+    strategy:
+      fail-fast: false
+      matrix:
+        generator_index: [0, 1]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out the private application read-only
+        uses: actions/checkout@v4
+        with:
+          repository: elikemnordor/break-it-live
+          ref: main
+          path: app
+          ssh-key: ${{ secrets.BREAK_IT_LIVE_DEPLOY_KEY }}
+          persist-credentials: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install dependencies
+        working-directory: app
+        run: pnpm install --frozen-lockfile
+
+      - name: Tune and record Linux socket limits
+        shell: bash
+        run: |
+          set -euo pipefail
+          hard_limit="$(ulimit -Hn)"
+          target_limit=250000
+          if (( hard_limit < target_limit )); then
+            target_limit="${hard_limit}"
+          fi
+          ulimit -Sn "${target_limit}" || true
+          sudo sysctl -w net.ipv4.ip_local_port_range="1024 65535" || true
+          sudo sysctl -w net.ipv4.tcp_tw_reuse=1 || true
+          echo "file descriptors soft: $(ulimit -Sn)"
+          echo "file descriptors hard: $(ulimit -Hn)"
+          sysctl net.ipv4.ip_local_port_range
+          sysctl net.ipv4.tcp_tw_reuse
+
+      - name: Allow the controller to open the lobby
+        run: sleep 20
+
+      - name: Run participant generator ${{ matrix.generator_index }}
+        working-directory: app
+        env:
+          GENERATOR_INDEX: ${{ matrix.generator_index }}
+          LOAD_REPORT_PATH: loadtest/reports/staging-5000-distributed-generator-${{ matrix.generator_index }}.json
+        run: |
+          pnpm test:load:distributed -- \
+            --role=generator \
+            --event-id="${EVENT_ID}" \
+            --clients=5000 \
+            --generator-count=2 \
+            --generator-index="${GENERATOR_INDEX}" \
+            --shards=32 \
+            --join-rate=63 \
+            --join-concurrency=100 \
+            --reconnect-percent=0 \
+            --taps-per-client=100 \
+            --taps-per-sync=25 \
+            --tapping-duration=5000 \
+            --countdown=1000 \
+            --ack-timeout=120000
+
+      - name: Preserve generator ${{ matrix.generator_index }} report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-5000-distributed-generator-${{ matrix.generator_index }}
+          path: app/loadtest/reports/staging-5000-distributed-generator-${{ matrix.generator_index }}.json
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    if: always()
+    needs: [controller, generators]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out the private application read-only
+        uses: actions/checkout@v4
+        with:
+          repository: elikemnordor/break-it-live
+          ref: main
+          path: app
+          ssh-key: ${{ secrets.BREAK_IT_LIVE_DEPLOY_KEY }}
+          persist-credentials: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install dependencies
+        working-directory: app
+        run: pnpm install --frozen-lockfile
+
+      - name: Download the controller report
+        uses: actions/download-artifact@v4
+        with:
+          name: staging-5000-distributed-controller
+          path: reports
+
+      - name: Download generator 0 report
+        uses: actions/download-artifact@v4
+        with:
+          name: staging-5000-distributed-generator-0
+          path: reports
+
+      - name: Download generator 1 report
+        uses: actions/download-artifact@v4
+        with:
+          name: staging-5000-distributed-generator-1
+          path: reports
+
+      - name: Merge the independent-host evidence
+        working-directory: app
+        env:
+          LOAD_REPORT_PATH: ../reports/staging-5000-distributed-merged.json
+        run: |
+          pnpm test:load:merge -- \
+            ../reports/staging-5000-distributed-controller.json \
+            ../reports/staging-5000-distributed-generator-0.json \
+            ../reports/staging-5000-distributed-generator-1.json
+
+      - name: Print the merged verdict
+        if: always()
+        run: |
+          if [[ -f reports/staging-5000-distributed-merged.json ]]; then
+            jq '{
+              connections,
+              traffic,
+              stage,
+              control,
+              health,
+              verdict
+            }' reports/staging-5000-distributed-merged.json
+          fi
+
+      - name: Preserve the merged report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-5000-distributed-merged
+          path: reports/staging-5000-distributed-merged.json
+          if-no-files-found: error
+          retention-days: 1
