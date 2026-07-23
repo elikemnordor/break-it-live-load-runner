@@ -2,6 +2,15 @@ name: Distributed Linux staging gate
 
 on:
   workflow_dispatch:
+    inputs:
+      profile:
+        description: Fixed distributed staging profile
+        required: true
+        type: choice
+        default: staging-5000
+        options:
+          - staging-5000
+          - staging-10000
 
 permissions:
   contents: read
@@ -11,7 +20,10 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  EVENT_ID: github-linux-staging-5000-distributed-${{ github.run_id }}-${{ github.run_attempt }}
+  CLIENTS: ${{ inputs.profile == 'staging-10000' && '10000' || '5000' }}
+  EVENT_ID: github-linux-${{ inputs.profile }}-distributed-${{ github.run_id }}-${{ github.run_attempt }}
+  GENERATOR_COUNT: ${{ inputs.profile == 'staging-10000' && '4' || '2' }}
+  GENERATOR_JOIN_RATE: ${{ inputs.profile == 'staging-10000' && '32' || '63' }}
   LOAD_BASE_URL: https://break-it-live-staging.elikemnordor.workers.dev
   LOAD_DISPLAY_ACCESS_CODE: ${{ secrets.STAGING_DISPLAY_ACCESS_CODE }}
   LOAD_OPERATOR_ACCESS_CODE: ${{ secrets.STAGING_OPERATOR_ACCESS_CODE }}
@@ -53,16 +65,16 @@ jobs:
       - name: Run the event controller
         working-directory: app
         env:
-          LOAD_REPORT_PATH: loadtest/reports/staging-5000-distributed-controller.json
+          LOAD_REPORT_PATH: loadtest/reports/staging-distributed-controller.json
         run: |
           pnpm test:load:distributed -- \
             --role=controller \
             --event-id="${EVENT_ID}" \
-            --clients=5000 \
-            --generator-count=2 \
+            --clients="${CLIENTS}" \
+            --generator-count="${GENERATOR_COUNT}" \
             --generator-index=0 \
             --shards=32 \
-            --join-rate=63 \
+            --join-rate="${GENERATOR_JOIN_RATE}" \
             --join-concurrency=100 \
             --reconnect-percent=0 \
             --taps-per-client=100 \
@@ -75,8 +87,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: staging-5000-distributed-controller
-          path: app/loadtest/reports/staging-5000-distributed-controller.json
+          name: staging-distributed-controller
+          path: app/loadtest/reports/staging-distributed-controller.json
           if-no-files-found: error
           retention-days: 1
 
@@ -84,7 +96,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        generator_index: [0, 1]
+        generator_index: ${{ fromJSON(inputs.profile == 'staging-10000' && '[0,1,2,3]' || '[0,1]') }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -136,16 +148,16 @@ jobs:
         working-directory: app
         env:
           GENERATOR_INDEX: ${{ matrix.generator_index }}
-          LOAD_REPORT_PATH: loadtest/reports/staging-5000-distributed-generator-${{ matrix.generator_index }}.json
+          LOAD_REPORT_PATH: loadtest/reports/staging-distributed-generator-${{ matrix.generator_index }}.json
         run: |
           pnpm test:load:distributed -- \
             --role=generator \
             --event-id="${EVENT_ID}" \
-            --clients=5000 \
-            --generator-count=2 \
+            --clients="${CLIENTS}" \
+            --generator-count="${GENERATOR_COUNT}" \
             --generator-index="${GENERATOR_INDEX}" \
             --shards=32 \
-            --join-rate=63 \
+            --join-rate="${GENERATOR_JOIN_RATE}" \
             --join-concurrency=100 \
             --reconnect-percent=0 \
             --taps-per-client=100 \
@@ -158,8 +170,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: staging-5000-distributed-generator-${{ matrix.generator_index }}
-          path: app/loadtest/reports/staging-5000-distributed-generator-${{ matrix.generator_index }}.json
+          name: staging-distributed-generator-${{ matrix.generator_index }}
+          path: app/loadtest/reports/staging-distributed-generator-${{ matrix.generator_index }}.json
           if-no-files-found: error
           retention-days: 1
 
@@ -196,35 +208,33 @@ jobs:
       - name: Download the controller report
         uses: actions/download-artifact@v4
         with:
-          name: staging-5000-distributed-controller
+          name: staging-distributed-controller
           path: reports
 
-      - name: Download generator 0 report
+      - name: Download all generator reports
         uses: actions/download-artifact@v4
         with:
-          name: staging-5000-distributed-generator-0
+          pattern: staging-distributed-generator-*
           path: reports
-
-      - name: Download generator 1 report
-        uses: actions/download-artifact@v4
-        with:
-          name: staging-5000-distributed-generator-1
-          path: reports
+          merge-multiple: true
 
       - name: Merge the independent-host evidence
         working-directory: app
         env:
-          LOAD_REPORT_PATH: ../reports/staging-5000-distributed-merged.json
+          LOAD_REPORT_PATH: ../reports/staging-distributed-merged.json
         run: |
+          mapfile -t generator_reports < <(
+            find ../reports -maxdepth 1 -type f \
+              -name 'staging-distributed-generator-*.json' | sort
+          )
           pnpm test:load:merge -- \
-            ../reports/staging-5000-distributed-controller.json \
-            ../reports/staging-5000-distributed-generator-0.json \
-            ../reports/staging-5000-distributed-generator-1.json
+            ../reports/staging-distributed-controller.json \
+            "${generator_reports[@]}"
 
       - name: Print the merged verdict
         if: always()
         run: |
-          if [[ -f reports/staging-5000-distributed-merged.json ]]; then
+          if [[ -f reports/staging-distributed-merged.json ]]; then
             jq '{
               connections,
               traffic,
@@ -232,14 +242,14 @@ jobs:
               control,
               health,
               verdict
-            }' reports/staging-5000-distributed-merged.json
+            }' reports/staging-distributed-merged.json
           fi
 
       - name: Preserve the merged report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: staging-5000-distributed-merged
-          path: reports/staging-5000-distributed-merged.json
+          name: staging-distributed-merged
+          path: reports/staging-distributed-merged.json
           if-no-files-found: error
           retention-days: 1
