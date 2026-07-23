@@ -11,6 +11,8 @@ on:
         options:
           - staging-5000
           - staging-10000
+          - staging-15000
+          - staging-20000
 
 permissions:
   contents: read
@@ -20,10 +22,10 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  CLIENTS: ${{ inputs.profile == 'staging-10000' && '10000' || '5000' }}
+  CLIENTS: ${{ inputs.profile == 'staging-20000' && '20000' || inputs.profile == 'staging-15000' && '15000' || inputs.profile == 'staging-10000' && '10000' || '5000' }}
   EVENT_ID: github-linux-${{ inputs.profile }}-distributed-${{ github.run_id }}-${{ github.run_attempt }}
-  GENERATOR_COUNT: ${{ inputs.profile == 'staging-10000' && '4' || '2' }}
-  GENERATOR_JOIN_RATE: ${{ inputs.profile == 'staging-10000' && '32' || '63' }}
+  GENERATOR_COUNT: ${{ inputs.profile == 'staging-20000' && '8' || inputs.profile == 'staging-15000' && '6' || inputs.profile == 'staging-10000' && '4' || '2' }}
+  GENERATOR_JOIN_RATE: ${{ inputs.profile == 'staging-20000' && '16' || inputs.profile == 'staging-15000' && '22' || inputs.profile == 'staging-10000' && '32' || '63' }}
   LOAD_BASE_URL: https://break-it-live-staging.elikemnordor.workers.dev
   LOAD_DISPLAY_ACCESS_CODE: ${{ secrets.STAGING_DISPLAY_ACCESS_CODE }}
   LOAD_OPERATOR_ACCESS_CODE: ${{ secrets.STAGING_OPERATOR_ACCESS_CODE }}
@@ -96,7 +98,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        generator_index: ${{ fromJSON(inputs.profile == 'staging-10000' && '[0,1,2,3]' || '[0,1]') }}
+        generator_index: ${{ fromJSON(inputs.profile == 'staging-20000' && '[0,1,2,3,4,5,6,7]' || inputs.profile == 'staging-15000' && '[0,1,2,3,4,5]' || inputs.profile == 'staging-10000' && '[0,1,2,3]' || '[0,1]') }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
